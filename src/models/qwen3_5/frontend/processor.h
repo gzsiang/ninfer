@@ -96,6 +96,31 @@ struct ProcessorOptions {
     double video_fps                       = 2.0;
     int video_min_frames                   = 4;
     int video_max_frames                   = 768;
+
+    // Per-item pixel ceiling for this request. `image_max_pixels` remains the hard global cap; when
+    // the media count is known the aggregate Vision budget is split evenly across items, so a
+    // single-image request renders at much higher detail than the whole-prompt floor.
+    //
+    // One Vision token covers (patch_size * merge_size)^2 pixels, matching the compiled Vision
+    // patch geometry (16 * 2 = 32, i.e. 1024 pixels per token). kPatch/kMerge are file-local to
+    // processor.cpp, so the merged side is restated here as a named constant.
+    static constexpr std::uint64_t kMergedPatchSide = 32;
+    static constexpr std::uint64_t kPixelsPerVisionToken =
+        kMergedPatchSide * kMergedPatchSide;
+
+    // The value is clamped to the single-item execution ceiling (items pass through the Vision
+    // tower sequentially), and by construction never exceeds kMaximumVisionItemRawPatches.
+    [[nodiscard]] std::uint64_t image_pixels_per_item(std::size_t media_items) const {
+        if (media_items == 0) { return image_max_pixels; }
+        const std::uint64_t aggregate_raw_patches =
+            max_raw_patches < kMaximumVisionItemRawPatches * media_items
+                ? max_raw_patches
+                : kMaximumVisionItemRawPatches * media_items;
+        const std::uint64_t per_item_tokens =
+            aggregate_raw_patches / kRawPatchesPerVisionToken / media_items;
+        const std::uint64_t per_item_pixels = per_item_tokens * kPixelsPerVisionToken;
+        return per_item_pixels < image_max_pixels ? per_item_pixels : image_max_pixels;
+    }
 };
 
 struct ProcessedInput {

@@ -294,10 +294,11 @@ private:
 
 Prepared prepare_image(std::span<const std::uint8_t> bytes, const ProcessorOptions& options,
                        const media::decode::Policy& policy, MediaPreprocessCache& cache,
-                       ConcurrentMediaBudget& request_budget, const PreparationControl& control) {
+                       ConcurrentMediaBudget& request_budget, const PreparationControl& control,
+                       std::uint64_t per_item_max_pixels) {
     media::decode::Image image = media::decode::decode_image(bytes, policy);
     const Size size = smart_resize_image(image.height, image.width, options.image_min_pixels,
-                                         options.image_max_pixels);
+                                         per_item_max_pixels);
     const int gh    = size.h / kPatch;
     const int gw    = size.w / kPatch;
     Prepared out;
@@ -429,10 +430,11 @@ std::size_t validate_media_inputs(std::span<ChatPart* const> parts,
 }
 
 VisionItem inspect_image_item(std::span<const std::uint8_t> bytes, const ProcessorOptions& options,
-                              const media::decode::Policy& policy) {
+                              const media::decode::Policy& policy,
+                              std::uint64_t per_item_max_pixels) {
     const media::decode::ImageInfo image = media::decode::inspect_image(bytes, policy);
     const Size size = smart_resize_image(image.height, image.width, options.image_min_pixels,
-                                         options.image_max_pixels);
+                                         per_item_max_pixels);
     VisionItem item;
     item.modality = Modality::Image;
     item.grid     = {1, size.h / kPatch, size.w / kPatch};
@@ -881,14 +883,16 @@ std::size_t Processor::count_tokens(std::vector<ChatMessage> messages,
     };
     std::vector<VisionItem> items;
     items.reserve(parts.size());
+    const std::uint64_t per_item_max_pixels = options_.image_pixels_per_item(parts.size());
     PreprocessStats stats;
     try {
         for (const ChatPart* part : parts) {
             check_preparation_control(control);
             enforce_image_resize_policy(*part, options_, policy);
-            VisionItem item = part->kind == ChatPartKind::Image
-                                  ? inspect_image_item(part->media.bytes, options_, policy)
-                                  : inspect_video_item(part->media.bytes, options_, policy);
+            VisionItem item =
+                part->kind == ChatPartKind::Image
+                    ? inspect_image_item(part->media.bytes, options_, policy, per_item_max_pixels)
+                    : inspect_video_item(part->media.bytes, options_, policy);
             PreprocessStats item_stats;
             add_budget(item_stats, item);
             enforce_media_item_resource_limits(item_stats);
@@ -962,6 +966,7 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
     std::vector<PendingMedia> pending_items;
     pending_items.reserve(parts.size());
     ConcurrentMediaBudget request_budget(options_);
+    const std::uint64_t per_item_max_pixels = options_.image_pixels_per_item(parts.size());
     std::exception_ptr preparation_error;
     const auto media_phase_started = Clock::now();
     for (ChatPart* part : parts) {
@@ -971,16 +976,21 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
                 sha256(part->media.bytes, [&control] { check_preparation_control(control); });
             const ChatPartKind kind = part->kind;
             const MediaCacheKey key{
-                .digest   = digest,
-                .modality = kind == ChatPartKind::Image ? Modality::Image : Modality::Video,
+                .digest        = digest,
+                .modality      = kind == ChatPartKind::Image ? Modality::Image : Modality::Video,
+                // Videos keep their own (composition-independent) budget; only still
+                // images participate in the per-request auto-tier split.
+                .resize_pixels = kind == ChatPartKind::Image ? per_item_max_pixels
+                                                             : options_.video_max_pixels,
             };
             PendingMedia pending = media_cache_->begin_prepare(
                 key, worker_control,
-                [this, part, kind, digest, &policy, &request_budget, &worker_control]() {
+                [this, part, kind, digest, &policy, &request_budget, &worker_control,
+                 per_item_max_pixels]() {
                     Prepared built =
                         kind == ChatPartKind::Image
                             ? prepare_image(part->media.bytes, options_, policy, *media_cache_,
-                                            request_budget, worker_control)
+                                            request_budget, worker_control, per_item_max_pixels)
                             : prepare_video(part->media.bytes, options_, policy, *media_cache_,
                                             request_budget, worker_control);
                     built.item.content_digest = digest;

@@ -15,6 +15,12 @@ struct MediaCacheKey {
     std::array<std::uint8_t, 32> digest{};
     Modality modality = Modality::Image;
 
+    // Resize target (max pixels) this payload was prepared for. The auto-tier logic
+    // sizes an image from how many items the *request* carries, so the same bytes can
+    // legitimately need different geometries. Two entries that differ here must never
+    // be treated as interchangeable.
+    std::uint64_t resize_pixels = 0;
+
     [[nodiscard]] bool operator==(const MediaCacheKey&) const noexcept = default;
 };
 

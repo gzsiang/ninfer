@@ -26,7 +26,10 @@ struct KeyHash {
         for (std::uint8_t byte : key.digest) {
             value ^= static_cast<std::size_t>(byte) + 0x9e3779b9U + (value << 6U) + (value >> 2U);
         }
-        return value ^ static_cast<std::size_t>(key.modality);
+        value ^= static_cast<std::size_t>(key.modality);
+        value ^= static_cast<std::size_t>(key.resize_pixels) + 0x9e3779b9U +
+                 (value << 6U) + (value >> 2U);
+        return value;
     }
 };
 
